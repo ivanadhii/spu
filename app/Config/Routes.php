@@ -15,7 +15,7 @@ $routes->setDefaultController('Beranda');
 $routes->setDefaultMethod('index');
 $routes->setTranslateURIDashes(false);
 $routes->set404Override();
-$routes->setAutoRoute(true);
+$routes->setAutoRoute(false); //diubah
 
 /**
  * @var RouteCollection $routes
@@ -47,6 +47,20 @@ $routes->post('admin/DataUsers/addRole', 'admin\DataUsers::addRole', ['filter' =
 $routes->post('admin/DataUsers/deleteUser', 'admin\DataUsers::deleteUser', ['filter' => 'role:admin']);
 $routes->get('admin/dashboard/getInactiveUsers', 'admin\Dashboard::getInactiveUsers' , ['filter' => 'role:admin']);
 $routes->get('linkshistory', 'admin\LinksHistory::index', ['filter' => 'role:admin']);
+
+
+// ===== API Routes - Hanya Login & Shortener =====
+$routes->group('api/v1', ['namespace' => 'App\Controllers\Api'], function($routes) {
+    
+    // API Login
+    $routes->post('login', 'ApiController::login');
+    
+    // API Shortener (butuh login)
+    $routes->post('shorten', 'ApiController::createShortLink', ['filter' => 'apiauth']);
+    
+    // API untuk mendapatkan link user (opsional)
+    $routes->get('my-links', 'ApiController::getMyLinks', ['filter' => 'apiauth']);
+});
 
 // $routes->get('(:any)', 'Shortener::redirect/$1');
 $routes->post('shortener/decrypt', 'Shortener::decrypt');
