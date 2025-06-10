@@ -100,23 +100,14 @@ class ApiController extends BaseController
         // Cek kredensial
         if (!$user || !password_verify($password, $user->password_hash)) {
             return $this->fail([
-                'message' => 'Invalid credentials',
-                'debug_info' => [
-                    'user_found' => $user ? true : false,
-                    'password_check' => $user ? password_verify($password, $user->password_hash) : false,
-                    'login_attempted' => $login
-                ]
+                'message' => 'Invalid credentials'
             ], 401);
         }
 
         // Cek apakah akun aktif
         if (!$user->active) {
             return $this->fail([
-                'message' => 'Account not activated',
-                'debug_info' => [
-                    'user_active' => $user->active,
-                    'activate_hash' => !empty($user->activate_hash)
-                ]
+                'message' => 'Account not activated'
             ], 401);
         }
 
@@ -140,36 +131,42 @@ class ApiController extends BaseController
     }
 
     /**
-     * API Create Short Link - Disesuaikan dengan struktur database existing
+     * API Create Short Link
      */
     public function createShortLink()
     {
-        // Validasi input (hapus validasi expiry karena tidak disimpan di DB)
-        $rules = [
-            'original_url' => 'required|valid_url'
-        ];
-
-        if (!$this->validate($rules)) {
-            return $this->fail([
-                'message' => 'Validation failed',
-                'errors' => $this->validator->getErrors()
-            ], 400);
+        // Fix input reading - Support both JSON and POST
+        $input = $this->request->getJSON(true);
+        if (!$input) {
+            $input = $this->request->getPost();
+        }
+        
+        log_message('debug', 'Shorten API Input: ' . json_encode($input));
+        
+        // Validate required fields
+        if (empty($input['original_url'])) {
+            return $this->fail(['message' => 'original_url is required'], 400);
+        }
+        
+        // Validate URL format
+        if (!filter_var($input['original_url'], FILTER_VALIDATE_URL)) {
+            return $this->fail(['message' => 'original_url must be a valid URL'], 400);
         }
 
-        // Ambil data dari request
-        $originalUrl = $this->request->getPost('original_url');
-        $aliasUrl = $this->request->getPost('alias_url');
-        $encryption = $this->request->getPost('encryption') == true;
-        $password = $this->request->getPost('password');
-        $expiry = $this->request->getPost('expiry') ?: '1 Minggu'; // Default jika tidak ada
+        // Extract data from input
+        $originalUrl = $input['original_url'];
+        $aliasUrl = $input['alias_url'] ?? '';
+        $encryption = isset($input['encryption']) && $input['encryption'];
+        $password = $input['password'] ?? '';
+        $expiry = $input['expiry'] ?? 'Tanpa Batasan Periode Waktu'; // Default tanpa batas
 
-        // Dapatkan user dari token
+        // Get user from token
         $user = $this->getCurrentUser();
         if (!$user) {
             return $this->fail(['message' => 'User not found'], 401);
         }
 
-        // Validasi alias URL jika ada
+        // Validate alias URL if provided
         if (!empty($aliasUrl)) {
             if (strlen($aliasUrl) > 75) {
                 return $this->fail([
@@ -177,20 +174,20 @@ class ApiController extends BaseController
                 ], 400);
             }
 
-            // Cek apakah alias sudah digunakan
+            // Check if alias already exists for this user (TANPA CEK expired_at)
             $existingLink = $this->linkModel->where('alias_url', $aliasUrl)
                 ->where('user_id', $user->id)
-                ->where('expired_at >', date('Y-m-d H:i:s'))
+                ->where('deleted_at IS NULL', null, false)
                 ->first();
 
             if ($existingLink) {
                 return $this->fail([
-                    'message' => 'Alias URL already exists and is active'
+                    'message' => 'Alias URL already exists'
                 ], 400);
             }
         }
 
-        // Validasi password jika encryption aktif
+        // Validate password if encryption is enabled
         if ($encryption && empty($password)) {
             return $this->fail([
                 'message' => 'Password required for encryption'
@@ -208,7 +205,7 @@ class ApiController extends BaseController
             $shortenedUrl = 'https://s.pu.go.id/' . $encodedUserId . '/' . $randomString;
         }
 
-        // Handle encryption jika diperlukan
+        // Handle encryption if needed
         $encryptedPassword = null;
         $encryptedUrl = null;
         $isEncrypted = 0;
@@ -224,43 +221,48 @@ class ApiController extends BaseController
             $isEncrypted = 1;
         }
 
-        // Hitung tanggal kadaluarsa
+        // Calculate expiry date (UNTUK DATABASE COMPATIBILITY)
         $expiredAt = $this->calculateExpiryDate($expiry);
 
-        // Simpan ke database - HANYA field yang ada di database
+        // Prepare data for insertion - HAPUS expired_at jika tidak ada di database
         $data = [
+            'user_id' => $userId,
             'original_url' => $originalUrl,
-            'alias_url' => $aliasUrl,
+            'alias_url' => $aliasUrl ?: null,
             'shortened_url' => $shortenedUrl,
             'encryption' => $encryptedUrl,
             'password' => $encryptedPassword,
-            'user_id' => $userId,
-            'created_at' => date('Y-m-d H:i:s'),
             'is_encrypted' => $isEncrypted,
-            'expired_at' => $expiredAt
-            // TIDAK termasuk 'expiry' karena kolom tidak ada di database production
+            'expiry' => $expiry,
+            // 'expired_at' => $expiredAt,  // COMMENT DULU karena kolom tidak ada
+            'created_at' => date('Y-m-d H:i:s')
         ];
 
-        if ($this->linkModel->insert($data)) {
-            return $this->respondCreated([
-                'status' => 'success',
-                'message' => 'Short link created successfully',
-                'data' => [
-                    'id' => $this->linkModel->getInsertID(),
-                    'original_url' => $originalUrl,
-                    'shortened_url' => $shortenedUrl,
-                    'alias_url' => $aliasUrl,
-                    'is_encrypted' => $isEncrypted,
-                    'expiry' => $expiry, // Tetap return di response meski tidak disimpan
-                    'expired_at' => $expiredAt,
-                    'created_at' => $data['created_at']
-                ]
-            ]);
+        log_message('debug', 'Insert Data: ' . json_encode($data));
+
+        try {
+            if ($this->linkModel->insert($data)) {
+                return $this->respondCreated([
+                    'status' => 'success',
+                    'message' => 'Short link created successfully',
+                    'data' => [
+                        'id' => $this->linkModel->getInsertID(),
+                        'original_url' => $originalUrl,
+                        'shortened_url' => $shortenedUrl,
+                        'alias_url' => $aliasUrl,
+                        'is_encrypted' => $isEncrypted,
+                        'expiry' => $expiry,
+                        // 'expired_at' => $expiredAt,  // COMMENT DULU
+                        'created_at' => $data['created_at']
+                    ]
+                ]);
+            }
+        } catch (\Exception $e) {
+            log_message('error', 'Insert Error: ' . $e->getMessage());
+            return $this->fail(['message' => 'Database error: ' . $e->getMessage()], 500);
         }
 
-        return $this->fail([
-            'message' => 'Failed to create short link'
-        ], 500);
+        return $this->fail(['message' => 'Failed to create short link'], 500);
     }
 
     /**
@@ -278,6 +280,13 @@ class ApiController extends BaseController
                                 ->findAll();
 
         $formattedLinks = array_map(function($link) {
+            // Calculate expiry status based on created_at + expiry
+            $isExpired = false;
+            if (isset($link['expiry']) && $link['expiry'] !== 'Tanpa Batasan Periode Waktu') {
+                $expiredDate = $this->calculateExpiryDate($link['expiry'], $link['created_at']);
+                $isExpired = (new \DateTime() > new \DateTime($expiredDate));
+            }
+
             return [
                 'id' => $link['id'],
                 'original_url' => $link['original_url'],
@@ -285,9 +294,8 @@ class ApiController extends BaseController
                 'alias_url' => $link['alias_url'],
                 'is_encrypted' => $link['is_encrypted'],
                 'expiry' => $link['expiry'],
-                'expired_at' => $link['expired_at'],
                 'created_at' => $link['created_at'],
-                'is_expired' => (new \DateTime() > new \DateTime($link['expired_at']))
+                'is_expired' => $isExpired
             ];
         }, $links);
 
@@ -332,6 +340,7 @@ class ApiController extends BaseController
             $decoded = JWT::decode($token, new Key($this->jwtSecretKey, 'HS256'));
             return $this->userModel->find($decoded->user_id);
         } catch (\Exception $e) {
+            log_message('error', 'JWT decode error: ' . $e->getMessage());
             return null;
         }
     }
@@ -367,21 +376,22 @@ class ApiController extends BaseController
     /**
      * Calculate expiry date
      */
-    private function calculateExpiryDate($expiry)
+    private function calculateExpiryDate($expiry, $baseDate = null)
     {
         $maxDate = '9999-12-31 23:59:59';
+        $baseTime = $baseDate ? strtotime($baseDate) : time();
         
         switch ($expiry) {
             case '2 Minggu':
-                return date('Y-m-d H:i:s', strtotime('+2 Weeks'));
+                return date('Y-m-d H:i:s', strtotime('+2 weeks', $baseTime));
             case '1 Bulan':
-                return date('Y-m-d H:i:s', strtotime('+1 Month'));
+                return date('Y-m-d H:i:s', strtotime('+1 month', $baseTime));
             case '1 Minggu':
-                return date('Y-m-d H:i:s', strtotime('+1 Week'));
+                return date('Y-m-d H:i:s', strtotime('+1 week', $baseTime));
             case 'Tanpa Batasan Periode Waktu':
                 return $maxDate;
             default:
-                return date('Y-m-d H:i:s', strtotime('+1 Week'));
+                return $maxDate; // Default tanpa batas
         }
     }
 }
